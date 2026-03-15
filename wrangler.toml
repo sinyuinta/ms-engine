@@ -1,0 +1,46 @@
+﻿name = "ms-engine-test"
+main = "src/index.ts"
+compatibility_date = "2025-10-19"
+workers_dev = true
+
+account_id = "8d00220433a77d482461acac81de8197"
+
+[[kv_namespaces]]
+binding = "TEAM_STATE"
+id = "fedf5a233ab7472d86afb8f308614e98"   # ← 新しいIDに更新！
+
+[[kv_namespaces]]
+binding = "TARGETS"
+id = "2c53b8487f6347d7964b7ed1c31c88a6"   # ← 新しいIDに更新！
+
+
+[[kv_namespaces]]
+binding = "COMPANY_AUTH"
+id = "177b7c46004e42e980c41da7309002a1"
+
+[[kv_namespaces]]
+binding = "MESSAGE_EVENTS"
+id = "8ed722d505784983b8b7b7635994227d"
+
+[[d1_databases]]
+binding = "ms_engine_db"
+database_name = "ms-engine-db"
+database_id = "4796ca80-f633-4785-ac33-60d347f5dc31"
+
+[[durable_objects.bindings]]
+name = "DASHBOARD_HUB"
+class_name = "DashboardHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DashboardHub"]
+
+[vars]
+ALLOWED_ORIGINS = "https://shiko-athletic-test2.pages.dev,http://localhost:5173"
+GOOGLE_CLIENT_ID = "1099294209665-udotc823qtnduj8pt2ap155fmv1ijmbn.apps.googleusercontent.com"
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
