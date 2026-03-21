@@ -528,9 +528,8 @@ if (method === "POST" && path === "/persona/logBias") {
   const topic = body.topic || "";
   const fields = body.fields || {};
 
-  console.log("🧠 [logBias] チェックリスト方式（24バイアス個別判定）", { topic, fields });
+  console.log("🧠 [logBias] 単一ラベル分類モード", { topic, fields });
 
-  // === バイアスごとの固定アドバイス（第2層 #1, #2, #3） ===
   const BIAS_FIXED_ADVICE: Record<string, [string, string, string]> = {
     "短絡": [
       "物事の原因は一つとは限らない。その出来事の背景に、他の要因や複雑な事情がないか考えてみよう。",
@@ -930,25 +929,52 @@ if (method === "POST" && path === "/persona/logBias") {
     }
   ];
 
+  // === チェックリストをプロンプト用に整形 ===
+  const checklistText = BIAS_CHECKLIST.map(
+    (b) => `【${b.id}】\n${b.criteria}`
+  ).join("\n\n---\n\n");
+
+
+
+  // === システムプロンプト ===
+  const SYSTEM_PROMPT = `
+あなたは思考バイアス分類AIです。
+
+以下の定義に厳密に従って分類しなさい。
+
+${checklistText}
+
+【タスク】
+最も支配的な思考バイアスを1つだけ選べ。
+
+【ルール】
+- 必ず1つだけ選ぶ
+- "none" は使用禁止。必ずいずれかのバイアス名を返せ
+- 完全一致でなくても、最も近いものを選べ
+- 迷ったら「速断」「楽観」「飛躍」のどれかを選べ
+
+【出力形式（JSONのみ）】
+{"fallacy": "<バイアス名>"}
+`;
+
   try {
     const client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
     const results = {};
 
     for (const [field, rawValue] of Object.entries(fields)) {
-      // 空欄スキップ
       if (!rawValue || (typeof rawValue === "string" && !rawValue.trim())) continue;
 
-      // 🧩 plans対応: 配列やオブジェクト構造なら展開してテキスト化
+      // === テキスト整形 ===
       let text = "";
       if (Array.isArray(rawValue)) {
         text = rawValue
           .map((p, i) => {
             if (typeof p === "string") return p;
-            return `(${i + 1}) ${p.who || "誰か"}の計画:\n- 何を: ${
-              p.what || "—"
-            }\n- どうやって: ${p.how || "—"}\n- 良い予想: ${
-              p.good || "—"
-            }\n- 良くない予想: ${p.bad || "—"}`;
+            return `(${i + 1}) ${p.who || "誰か"}の計画:
+- 何を: ${p.what || "—"}
+- どうやって: ${p.how || "—"}
+- 良い予想: ${p.good || "—"}
+- 悪い予想: ${p.bad || "—"}`;
           })
           .join("\n\n");
       } else if (typeof rawValue === "object") {
@@ -977,144 +1003,53 @@ if (method === "POST" && path === "/persona/logBias") {
         text = String(rawValue);
       }
 
-      // === チェックリスト形式のプロンプトを生成（2段階呼び出し） ===
-      // SET1: 循環〜矮小（論理の誤り系 17種類）
-      // SET2: 速断〜不明（判断の誤り系 6種類）
-      const SET1_IDS = ["循環", "二択", "歪曲", "飛躍", "類推", "偶然", "分割", "中傷", "巻添", "転嫁", "慣習", "恐怖", "憤怒", "同情", "嘲笑", "幻想", "矮小"];
-      const SET2_IDS = ["速断", "曖昧", "権威", "同調", "楽観", "不明"];
-      
-      const SET1 = BIAS_CHECKLIST.filter(b => SET1_IDS.includes(b.id));
-      const SET2 = BIAS_CHECKLIST.filter(b => SET2_IDS.includes(b.id));
+      console.log(`🔄 [${field}] 判定中...`);
 
-      const buildPrompt = (biasSet: typeof BIAS_CHECKLIST, setName: string) => {
-        const checklistPrompt = biasSet.map((bias, idx) => 
-          `【${idx + 1}. ${bias.id}】\n質問：${bias.question}\n${bias.criteria}`
-        ).join("\n\n---\n\n");
-        
-        const outputKeys = biasSet.map(b => `    "${b.id}": "yes" または "no"`).join(",\n");
-        
-        return `あなたは教育支援AIです。以下の文章に対して、${biasSet.length}種類のバイアス（${setName}）それぞれについて該当するかどうかを判定してください。
-
-【判定対象テキスト】
-ワークシートの「${field}」欄に書かれた内容です。
-
-【最重要原則：非該当時は沈黙】
-- 判定は厳格に行い、明確にバイアスに該当する場合のみ"yes"としてください。
-- 迷った場合、グレーゾーンの場合は"no"としてください。
-- バイアス検出は誤検知（false positive）を最小化することを優先してください。
-
-【判定対象外（必ずno）】
-以下のような文章は、バイアス判定の対象外です。全て"no"としてください：
-1. 事実の記述・観察結果の報告（「〜があった」「〜を見た」「〜という状況」）
-2. 具体例の列挙・事例の紹介
-3. 個人の経験談・体験の共有
-4. 困りごとや課題の認識（困っていることを述べているだけ）
-5. 前提条件や状況の説明
-6. 感想や印象の表明（主張・提案ではない場合）
-7. 質問や疑問の提示
-8. ワークシートの「困りごと」「前提」「具体例」欄に書かれた内容（これらは記述欄であり、論証欄ではない）
-
-【判定方法】
-各バイアスについて、以下の形式でyes/noを判定してください。
-- 明確に該当する場合のみ: "yes"
-- 該当しない、または判断が微妙な場合: "no"
-
-【重要ルール】
-- 各バイアスの「判定のヒント - 以下の全てを満たす場合のみyes」を厳格に適用してください。
-- 「判定対象外」に該当する場合は、そのバイアスには"no"を返してください。
-- 「不明」は最終手段です。文の意味が理解できる限り「不明」にはしないでください。
-- 複数のバイアスに明確に該当する場合は、全て"yes"としてください。
-- どのバイアスにも該当しない場合は、全て"no"で構いません（これが最も多いはずです）。
-
-========================================
-【${setName}：${biasSet.length}種類のバイアス判定チェックリスト】
-========================================
-
-${checklistPrompt}
-
-========================================
-
-【出力形式（JSONのみ）】
-{
-  "checkResults": {
-${outputKeys}
-  },
-  "advice": "該当するバイアスに基づいた具体的な改善アドバイス（該当なしなら空文字）"
-}`;
-      };
-
-      // === 2段階でOpenAI API呼び出し ===
-      console.log(`🔄 [${field}] SET1（論理の誤り系 ${SET1.length}種類）を判定中...`);
-      const completion1 = await client.chat.completions.create({
-        model: "gpt-4o-mini",
+      // === API呼び出し ===
+      const completion = await client.chat.completions.create({
+        model: "gpt-4o-mini", // 後で gpt-5.4-mini
         temperature: 0,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildPrompt(SET1, "論理の誤り系") },
-          { role: "user", content: `テーマ: ${topic}\n\n【判定対象テキスト】\n${text}` },
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: `テーマ: ${topic}\n\n${text}` },
         ],
       });
 
-      console.log(`🔄 [${field}] SET2（判断の誤り系 ${SET2.length}種類）を判定中...`);
-      const completion2 = await client.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: buildPrompt(SET2, "判断の誤り系") },
-          { role: "user", content: `テーマ: ${topic}\n\n【判定対象テキスト】\n${text}` },
-        ],
-      });
+      const raw = completion.choices[0]?.message?.content || "{}";
+      console.log(`📤 [${field}] 応答:`, raw);
 
-      const raw1 = completion1.choices[0]?.message?.content || "{}";
-      const raw2 = completion2.choices[0]?.message?.content || "{}";
-      console.log(`📤 [${field}] SET1応答:`, raw1);
-      console.log(`📤 [${field}] SET2応答:`, raw2);
-
-      let parsed1, parsed2;
-      try { parsed1 = JSON.parse(raw1); } catch { parsed1 = { checkResults: {}, advice: "" }; }
-      try { parsed2 = JSON.parse(raw2); } catch { parsed2 = { checkResults: {}, advice: "" }; }
-
-      // === 結果を統合 ===
-      const checkResults = { ...(parsed1.checkResults || {}), ...(parsed2.checkResults || {}) };
-
-      // === checkResultsから該当するバイアス（yes）をflagsに変換 ===
-      const flags: string[] = [];
-      
-      for (const bias of BIAS_CHECKLIST) {
-        if (checkResults[bias.id] === "yes") {
-          flags.push(bias.id);
-        }
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = { fallacy: "none" };
       }
 
-      // === flagsに基づいて固定アドバイスを生成 ===
+      // === fallacy安全処理 ===
+      let fallacy = parsed.fallacy || "none";
+
+      if (!BIAS_FIXED_ADVICE[fallacy]) {
+        fallacy = "none";
+      }
+
+      // === アドバイス取得 ===
       let finalAdvice = "";
-      if (flags.length > 0) {
-        // 検出されたバイアスごとにランダムに1つのアドバイスを選択
-        const adviceList = flags
-          .filter(biasId => BIAS_FIXED_ADVICE[biasId]) // 固定アドバイスが定義されているもののみ
-          .map(biasId => {
-            const advices = BIAS_FIXED_ADVICE[biasId];
-            const randomIndex = Math.floor(Math.random() * advices.length);
-            return advices[randomIndex];
-          });
-        finalAdvice = adviceList.join(" ");
+      if (fallacy !== "none") {
+        const advices = BIAS_FIXED_ADVICE[fallacy];
+        finalAdvice = advices[Math.floor(Math.random() * advices.length)];
       }
-
-      // === OUTLIER順にソート（表示の統一） ===
-      const ORDER = BIAS_CHECKLIST.map(b => b.id);
-      flags.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
 
       results[field] = {
         line: text,
-        flags: flags,
-        checkResults: checkResults,
-        advice: finalAdvice || ""
+        fallacy: fallacy,
+        advice: finalAdvice,
       };
     }
 
     const h = withCors(new Headers(), origin);
     return addEngineHeaders(json({ topic, results }, 200, h), method, path, rawPath);
+
   } catch (err) {
     const h = withCors(new Headers(), origin);
     return addEngineHeaders(
@@ -1125,6 +1060,7 @@ ${outputKeys}
     );
   }
 }
+
 
 
 if (method === "GET" && path === "/persona/checkKey") {
